@@ -1,7 +1,14 @@
 ﻿// testApplication.cpp : 此文件包含 "main" 函数。程序执行将在此处开始并结束。
 //
 
-//todo.设计成初步的脚本语言
+//todo.实现日志储存功能
+//	+记录运行时间
+//
+//长期目标:用class封装程序逻辑
+
+//已知问题:
+//1.当脚本文件编码不是GBK时echo输出的汉字可能为乱码
+//	目前并不打算处理这个问题(确实不会字符串转码)
 
 #include <iostream>
 #include <opencv2/opencv.hpp>
@@ -14,17 +21,113 @@
 #include <conio.h>
 #include <cstring>
 #include <vector>
+#include <stack>
+#include <ctime>
+#include <cmath>
 #pragma comment(lib,"winmm.lib")
 
 #define Keydown(key) ((GetAsyncKeyState(key) && 0x8000)?1:0)
 
+#define Pressbreak() (Keydown(17) && Keydown(18) && Keydown(16))
+
 using namespace cv;
 using namespace std;
 
-vector<int> buff[5];//time key opt <curx> <cury>
-bool bk[500];
+
+const int SCANGAP = 100;//截屏间隔(ms)
+const double PICACC = 0.95;//图片识别相似度(0-1,越大要求越精确)
+const bool MAKELOG = false;//是否输出日志文件(暂未使用)
+
+vector<int> buff[5];//opt
+vector<string> room;//辅助存储字符串
+/*
+press A	//单击A键							1
+keydown B//按下B键							2
+keyup B//弹起B键							3
+
+click L //单击鼠标左键						4
+mousedown R//按下鼠标右键					5
+mouseup M//抬起鼠标中键						6
+mousemove x y//移动鼠标位置					7
+
+wait 1000//暂停1000秒						8
+rest //暂停直到按下ctrl+alt					9
+waitkey A//暂停直到按下A键					10
+rwait 1000 20//随机暂停1000-(1000+20)ms		11
+
+waitscreenscan a.jpg						12
+//当屏幕中出现指定图片内容后继续
+
+loop 10//运行循环10次						13
+endloop//循环结束							14
+
+echo Hallo world//输出指定字符串			15
+
+note hello 2023//注释						16			
+
+*/
+
+
+bool bk[500];//检测按键切换
 int keyList[500],keyNum=0;
-int oemMark[500],oemBreak[500];
+int oemMark[500],oemBreak[500];//键盘对应oem码的按下和弹起
+stack<int> loopmark,loopcnt;//记录循环次数和对应行数
+
+
+void popError(int err, int var=0)//错误出现
+{
+	if (err == 1)
+	{
+		cout << "错误:文件不存在" << endl;
+	}
+	else if (err == 2)
+	{
+		cout << "错误:文件类型不匹配" << endl;
+	}
+	else if (err == 3)
+	{
+		cout << "错误:打开的不是一个文件" << endl;
+	}
+	else if (err == 4)
+	{
+		cout << "错误:第" << var << "条指令参数错误" << endl;
+	}
+	else if (err == 5)
+	{
+		cout << "错误:第" << var << "条指令名称错误" << endl;
+	}
+	else if (err == 6)
+	{
+		cout << "错误:文件" << room[var] << "不存在或无法读写" << endl;
+	}
+	else if (err == 7)
+	{
+		cout << "错误:第" << var << "条指令没有相匹配的loop语句" << endl;
+	}
+	else if (err == 8)
+	{
+		cout << "错误:第" << var << "条指令没有相匹配的endloop语句" << endl;
+	}
+	else if (err == 9)
+	{
+		cout << "错误:手动中断脚本运行" << endl;
+	}
+	else
+	{
+		cout << "错误:未知错误" << endl;
+	}
+	system("pause");
+	exit(-1);
+}
+
+void buffload(int a, int b = 0, int c = 0, int d = 0, int e = 0)
+{
+	buff[0].push_back(a);
+	buff[1].push_back(b);
+	buff[2].push_back(c);
+	buff[3].push_back(d);
+	buff[4].push_back(e);
+}
 
 void makeKeyList()//导入需要定位的按键列表
 {
@@ -97,6 +200,93 @@ int makeOem()//导入按键扫描码
 	oemBreak[8] = 0x8e;
 
 	return 0;
+}
+
+string keyName(int key)
+{
+	string rt="";
+	if (key >= 'A' && key <= 'Z')
+	{
+		rt += char(key);
+	}
+	if (key >= '0' && key <= '9')
+	{
+		rt += char(key);
+	}
+	if ((key >= ('0' + 48)) && (key <= ('9' + 48)))
+	{
+		rt += "num";
+		rt+=char(key - 48);
+	}
+	if (key == 1)
+	{
+		rt += "mouseL";
+	}
+	if (key == 2)
+	{
+		rt += "mouseR";
+	}
+	if (key == 4)
+	{
+		rt += "mouseM";
+	}
+	if (key == 13)
+	{
+		rt += "enter";
+	}
+	if (key == 9)
+	{
+		rt += "backspace";
+	}
+	if (key == 8)
+	{
+		rt += "tab";
+	}
+	return rt;
+}
+
+int keyCode(string name)
+{
+	if (name.size() == 1)//单个字符
+	{
+		char ch = name[0];
+		if (ch >= 'A' && ch <= 'Z')
+		{
+			return ch;
+		}
+		if (ch >= 'a' && ch <= 'z')
+		{
+			return 'A' + ch - 'a';
+		}
+		if (ch >= '0' && ch <= '9')
+		{
+			return ch;
+		}
+	}
+	else//多个字符
+	{
+		if (name.substr(0, 3) == "num")
+		{
+			char ch = name[3];
+			if (ch >= '0' && ch <= '9')
+			{
+				return ch + 48;
+			}
+		}
+		if (name == "enter" || name == "Enter" || name == "ENTER")
+		{
+			return 13;
+		}
+		if (name == "tab" || name == "Tab" || name == "TAB")
+		{
+			return 9;
+		}
+		if (name == "backspace" || name == "Backspace" || name == "BACKSPACE")
+		{
+			return 8;
+		}
+		return -1;
+	}
 }
 
 void GetStringSize(HDC hDC, const char* str, int* w, int* h)
@@ -289,15 +479,13 @@ Mat screenshot(double zoom)//截图并返回结果
 	return screenshot;
 }
 
-double screenMatch(string filename,int &x,int &y)//完全匹配
+double screenMatch(Mat temp,int &x,int &y)//完全匹配
 {
-	Mat img, temp,img_;
-	temp=imread(filename.c_str());
+	Mat img, img_;
 	double zoom = getZoom();
 	img_ = screenshot(zoom);
 
 	cvtColor(img_, img, COLOR_RGBA2RGB);
-
 	Mat result;
 	matchTemplate(img, temp, result, TM_CCOEFF_NORMED);//模板匹配
 	double maxVal, minVal;
@@ -309,26 +497,76 @@ double screenMatch(string filename,int &x,int &y)//完全匹配
 	return maxVal;
 }
 
-void bStart()
+void waitCtrlAlt()
+{
+	bool k1=false, k2 = false;
+	if (Keydown(17))
+	{
+		k1 = true;
+	}
+	if (Keydown(18))
+	{
+		k2 = true;
+	}
+	DWORD stTime = timeGetTime();
+	while (1)
+	{
+		if (k1 && (!Keydown(17)))
+		{
+			k1 = false;
+		}
+		if (k2 && (!Keydown(18)))
+		{
+			k2 = false;
+		}
+		if ((!(k1 || k2)) && Keydown(17) && Keydown(18))
+		{
+			if (timeGetTime() - stTime == 0)continue;
+			break;
+		}
+		if (Pressbreak())
+		{
+			popError(9);
+		}
+	}	
+	while (1)
+	{	
+		if ((!Keydown(17)) && (!Keydown(18)))
+		{
+			if (timeGetTime() - stTime == 0)continue;
+			break;
+		}
+		if (Pressbreak())
+		{
+			popError(9);
+		}
+	}
+}
+
+void waitWithTime(int t)
 {
 	DWORD stTime = timeGetTime();
 	while (1)
 	{
-		if (Keydown(17) && Keydown(18))
+		DWORD nowTime = timeGetTime();
+		if (nowTime - stTime >= t)
 		{
-			if (timeGetTime() - stTime == 0)continue;
 			break;
+		}
+		if (Pressbreak())
+		{
+			popError(9);
 		}
 	}
 }
 
 void makeRecord(string filename)
 {
-
+	int x, y,lsTime;
 	double zoom = getZoom();
 	ofstream fl(filename.c_str());
 	cout << "按下 ctrl + alt 开始录制操作" << endl;
-	bStart();
+	waitCtrlAlt();
 	cout << "录制开始, 按下 ctrl + shift + alt 结束录制操作" << endl;
 	DWORD stTime = timeGetTime();
 	int n = 0;
@@ -342,18 +580,17 @@ void makeRecord(string filename)
 			{
 				if (!bk[keyList[i]])
 				{
+					x = 0;
+					y = 0;
 					if (nowTime - stTime == 0)continue;
-					bk[keyList[i]] = true;
-					if (n)
-					{
-						fl << endl;
-					}
-					fl << nowTime - stTime << " " << keyList[i] << " " << (bk[keyList[i]] ? 1 : 0);
+					bk[keyList[i]] = true; 
 					if (keyList[i] == 1 || keyList[i] == 2 || keyList[i] == 4)
 					{
 						GetCursorPos(&pt);
-						fl << " " << int(pt.x*zoom) << " " << int(pt.y*zoom);
+						x = pt.x * zoom; 
+						y = pt.y * zoom;
 					}
+					buffload(nowTime - stTime, keyList[i], (bk[keyList[i]] ? 1 : 0), x, y);
 					n++;
 				}
 			}
@@ -361,18 +598,17 @@ void makeRecord(string filename)
 			{
 				if (bk[keyList[i]])
 				{
+					x = 0;
+					y = 0;
 					if (nowTime - stTime == 0)continue;
 					bk[keyList[i]] = false;
-					if (n)
-					{
-						fl << endl;
-					}
-					fl << nowTime - stTime << " " << keyList[i] << " " << (bk[keyList[i]] ? 1 : 0);
 					if (keyList[i] == 1 || keyList[i] == 2 || keyList[i] == 4)
 					{
 						GetCursorPos(&pt);
-						fl << " " << int(pt.x * zoom) << " " << int(pt.y * zoom);
+						x = pt.x * zoom;
+						y = pt.y * zoom;
 					}
+					buffload(nowTime - stTime, keyList[i], (bk[keyList[i]] ? 1 : 0), x, y);
 					n++;
 				}
 			}
@@ -383,12 +619,64 @@ void makeRecord(string filename)
 			break;
 		}
 	}
-	cout << "录制结束,共"<<n<<"次记录,结果已保存到" <<filename<< endl;
+	cout << "录制结束,共"<<n<<"次记录" << endl;
+	lsTime = 0;
+	for (int i = 0; i < n; i++)
+	{
+		if (i > 0)fl << endl;
+		fl << "wait " << buff[0][i] - lsTime<<endl;
+		lsTime = buff[0][i];
+		if (buff[1][i] == 1 || buff[1][i] == 2 || buff[1][i] == 4)//鼠标操作
+		{
+			fl << "mousemove " << buff[3][i] << " " << buff[4][i] << endl;
+			if (i < n - 1 && buff[1][i + 1] == buff[1][i] 
+				&& buff[0][i + 1] - buff[0][i] <= 80
+				&&buff[2][i]==1&&buff[2][i+1]==0)//按下即松开
+			{
+				fl << "click " << keyName(buff[1][i]);
+				i++;
+			}
+			else
+			{
+				if (buff[2][i] == 1)
+				{
+					fl << "mousedown " << keyName(buff[1][i]);
+				}
+				else
+				{
+					fl << "mouseup " << keyName(buff[1][i]);
+				}
+			}
+		}
+		else
+		{
+			if (i < n - 1 && buff[1][i + 1] == buff[1][i]
+				&& buff[0][i + 1] - buff[0][i] <= 80
+				&& buff[2][i] == 1 && buff[2][i + 1] == 0)//按下即松开
+			{
+				fl << "press " << keyName(buff[1][i]);
+				i++;
+			}
+			else
+			{
+				if (buff[2][i] == 1)
+				{
+					fl << "keydown " << keyName(buff[1][i]);
+				}
+				else
+				{
+					fl << "keyup " << keyName(buff[1][i]);
+				}
+			}
+		}
+	}
+	cout << "已保存到" << filename << endl;
 }
 
 void playRecord(string filename)
 {
-	int time, key, opt, curx, cury;
+	int time, key, curx, cury;
+	string opt,namestr,line;
 	double zoom = getZoom();
 
 	int width = GetSystemMetrics(SM_CXSCREEN) * zoom;
@@ -401,47 +689,225 @@ void playRecord(string filename)
 		return;
 	}
 	int n = 0,now=0;
-	bool fKey = true;
-	while (!fl.eof())
+	while (getline(fl,line))
 	{
+		istringstream rd(line);
 		curx = 0;
 		cury = 0;
-		fl >> time >> key >> opt;
-		if (key == 1 || key == 2 || key == 4)
+		rd >> opt; 
+		if (rd.fail())//空行
 		{
-			fl >> curx >> cury;
+			n++;
+			continue;
 		}
-		buff[0].push_back(time);
-		buff[1].push_back(key);
-		buff[2].push_back(opt);
-		buff[3].push_back(curx);
-		buff[4].push_back(cury);
+		if (opt == "press")
+		{
+			rd >> namestr;
+			key = keyCode(namestr);
+			if (key == -1 || rd.fail())
+			{
+				popError(4,n+1);
+			}
+			buffload(1, key);
+		}
+		else if (opt == "keydown")
+		{
+			rd >> namestr;
+			key = keyCode(namestr);
+			if (key == -1 || rd.fail())
+			{
+				popError(4,n+1);
+			}
+			buffload(2, key);
+
+		}
+		else if (opt == "keyup")
+		{
+			rd >> namestr;
+			key = keyCode(namestr);
+			if (key == -1 || rd.fail())
+			{
+				popError(4,n+1);
+			}
+			buffload(3, key);
+
+		}
+		else if (opt == "click")
+		{
+			rd >> namestr;
+			key = -1;
+			if (namestr.length() == 6 && (namestr.substr(0, 5) == "mouse"))
+			{
+				char ch = namestr[5];
+				if (ch == 'l' || ch == 'L')
+				{
+					key = 1;
+				}
+				else if (ch == 'r' || ch == 'R')
+				{
+					key = 2;
+				}
+				else if (ch == 'm' || ch == 'M')
+				{
+					key = 4;
+				}
+			}
+			if (key == -1 || rd.fail())
+			{
+				popError(4,n+1);
+			}
+			buffload(4, key);
+		}
+		else if (opt == "mouseup")
+		{
+			rd >> namestr;
+			key = -1;
+			if (namestr.length() == 6 && (namestr.substr(0, 5) == "mouse"))
+			{
+				char ch = namestr[5];
+				if (ch == 'l' || ch == 'L')
+				{
+					key = 1;
+				}
+				else if (ch == 'r' || ch == 'R')
+				{
+					key = 2;
+				}
+				else if (ch == 'm' || ch == 'M')
+				{
+					key = 4;
+				}
+			}
+			if (key == -1 || rd.fail())
+			{
+				popError(4,n+1);
+			}
+			buffload(5, key);
+		}
+		else if (opt == "mousedown")
+		{
+			rd >> namestr;
+			key = -1;
+			if (namestr.length() == 6 && (namestr.substr(0, 5) == "mouse"))
+			{
+				char ch = namestr[5];
+				if (ch == 'l' || ch == 'L')
+				{
+					key = 1;
+				}
+				else if (ch == 'r' || ch == 'R')
+				{
+					key = 2;
+				}
+				else if (ch == 'm' || ch == 'M')
+				{
+					key = 4;
+				}
+			}
+			if (key == -1 || rd.fail())
+			{
+				popError(4,n+1);
+			}
+			buffload(6, key);
+		}
+		else if (opt == "mousemove")
+		{
+			rd >> curx >> cury;
+			if (rd.fail())
+			{
+				popError(4,n+1);
+			}
+			buffload(7, curx,cury);
+		}
+		else if(opt == "wait")
+		{
+			rd >> time;
+			if (rd.fail())
+			{
+				popError(4,n+1);
+			}
+			buffload(8, time);
+		}
+		else if(opt == "rest")
+		{
+			buffload(9);
+		}
+		else if (opt == "waitkey")
+		{
+			rd >> namestr;
+			key = keyCode(namestr);
+			if (key == -1 || rd.fail())
+			{
+				popError(4,n+1);
+			}
+			buffload(10, key);
+			
+		}
+		else if (opt == "rwait")
+		{
+			rd >> time >> key;
+			if (rd.fail())
+			{
+				popError(4, n + 1);
+			}
+			buffload(11, time, key);
+		}
+		else if (opt == "waitscreenscan")
+		{
+			rd >> namestr;
+			if (rd.fail())
+			{
+				popError(4, n + 1);
+			}
+			buffload(12, room.size());
+			room.push_back(namestr);
+		}
+		else if (opt == "loop")
+		{
+			rd >> time;
+			if (time <= 0 || rd.fail())
+			{
+				popError(4, n + 1);
+			}
+			loopmark.push(n);
+			buffload(13,time);
+		}
+		else if (opt == "endloop")
+		{
+			if (loopmark.empty())
+			{
+				popError(7, n + 1);
+			}
+			buffload(14);
+			loopmark.pop();
+		}
+		else if (opt == "echo")
+		{
+			rd >> line;
+			getline(rd, namestr);
+			line += namestr;
+			buffload(15, room.size());
+			room.push_back(line);
+		}
+		else if (opt == "note")
+		{
+			buffload(16);
+		}
+		else
+		{
+			popError(5, n + 1);
+		}
 		n++;
 	}
-	cout << "是否使用开头按键激活回放(Y/N)" << endl;
-	char ch = getchar();
-	if (ch != 'Y')
+	if (!loopmark.empty())
 	{
-		fKey=false;
+		popError(8, loopmark.top()+1);
 	}
 	cout << "按下 ctrl + alt 开始回放操作" << endl;
-	bStart();
+	waitCtrlAlt();
 	DWORD stTime = timeGetTime();
-	if (fKey)
-	{
-		while (1)
-		{
-			DWORD nowTime = timeGetTime();
-			if (Keydown(buff[1][now]))
-			{
-				if (nowTime - stTime == 0)continue;
-				stTime = nowTime - buff[0][now];
-				break;
-			}
-		}
-		now++;
-	}
 	cout << "回放开始, 按下 ctrl + shift + alt 强制结束回放操作" << endl;
+	Pressbreak();
 	while (1)
 	{
 		DWORD nowTime = timeGetTime();
@@ -449,98 +915,214 @@ void playRecord(string filename)
 		{
 			break;
 		}
-		if (Keydown(17) && Keydown(18) && Keydown(16))
+		if (buff[0][now] == 1)
 		{
-			if (nowTime - stTime == 0)continue;
-			break;
+			keybd_event(buff[1][now], oemMark[buff[1][now]], 0, 0);
+			Sleep(10);
+			keybd_event(buff[1][now], oemBreak[buff[1][now]], KEYEVENTF_KEYUP, 0);
 		}
-		if ((((long long)nowTime - stTime) - buff[0][now] < 20) && (((long long)nowTime - stTime) - buff[0][now] > -20))
+		else if (buff[0][now] == 2)
 		{
-
-			if (key == 1 || key == 2 || key == 4)//鼠标操作
+			keybd_event(buff[1][now], oemMark[buff[1][now]], 0, 0);
+		}
+		else if (buff[0][now] == 3)
+		{
+			keybd_event(buff[1][now], oemBreak[buff[1][now]], KEYEVENTF_KEYUP, 0);
+		}
+		else if (buff[0][now] == 4)
+		{
+			if (buff[1][now] == 1)//左键
 			{
-				if (buff[2][now] == 1)
+				mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+				Sleep(10);
+				mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+			}
+			else if (buff[1][now] == 2)//右键
+			{
+				mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
+				Sleep(10);
+				mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
+			}
+			else if (buff[1][now] == 4)//滚轮
+			{
+				mouse_event(MOUSEEVENTF_MIDDLEDOWN, 0, 0, 0, 0);
+				Sleep(10);
+				mouse_event(MOUSEEVENTF_MIDDLEUP, 0, 0, 0, 0);
+			}
+		}
+		else if (buff[0][now] == 5)
+		{
+			if (buff[1][now] == 1)//左键
+			{
+				mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+			}
+			else if (buff[1][now] == 2)//右键
+			{
+				mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
+			}
+			else if (buff[1][now] == 4)//滚轮
+			{
+				mouse_event(MOUSEEVENTF_MIDDLEUP, 0, 0, 0, 0);
+			}
+		}
+		else if (buff[0][now] == 6)
+		{
+			if (buff[1][now] == 1)//左键
+			{
+				mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+			}
+			else if (buff[1][now] == 2)//右键
+			{
+				mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
+			}
+			else if (buff[1][now] == 4)//滚轮
+			{
+				mouse_event(MOUSEEVENTF_MIDDLEDOWN, 0, 0, 0, 0);
+			}
+		}
+		else if (buff[0][now] == 7)
+		{
+			mouse_event(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, buff[1][now] * 65536 / width, buff[2][now] * 65536 / height, 0, 0);
+		}
+		else if (buff[0][now] == 8)
+		{
+			waitWithTime(buff[1][now]);
+		}
+		else if (buff[0][now] == 9)
+		{
+			cout << "按下 ctrl + alt 继续回放操作" << endl;
+			waitCtrlAlt();
+		}
+		else if (buff[0][now] == 10)
+		{
+			key = buff[1][now];
+			cout << "按下 "<<keyName(buff[1][now])<<" 继续回放操作" << endl;
+			bool k1 = false;
+			if (Keydown(key))
+			{
+				k1 = true;
+			}
+			DWORD stTime = timeGetTime();
+			while (1)
+			{
+				if (k1 && (!Keydown(17)))
 				{
-					if (key == 1)//左键
-					{
-						mouse_event(MOUSEEVENTF_ABSOLUTE| MOUSEEVENTF_LEFTDOWN | MOUSEEVENTF_MOVE, buff[3][now]*65536/width, buff[4][now]*65536/height, 0, 0);
-					}
-					else if (key == 2)//右键
-					{
-						mouse_event(MOUSEEVENTF_ABSOLUTE| MOUSEEVENTF_RIGHTDOWN | MOUSEEVENTF_MOVE, buff[3][now]*65536/width, buff[4][now]*65536/height, 0, 0);
-					}
-					else if (key == 4)//滚轮
-					{
-						mouse_event(MOUSEEVENTF_ABSOLUTE| MOUSEEVENTF_MIDDLEDOWN | MOUSEEVENTF_MOVE, buff[3][now]*65536/width, buff[4][now]*65536/height, 0, 0);
-					}
-					cout << "按下" << buff[1][now] << endl;
+					k1 = false;
 				}
-				else
+				if ((!k1) && Keydown(key))
 				{
-					if (key == 1)//左键
-					{
-						mouse_event(MOUSEEVENTF_ABSOLUTE|MOUSEEVENTF_LEFTUP | MOUSEEVENTF_MOVE, buff[3][now]*65536/width, buff[4][now]*65536/height, 0, 0);
-					}
-					else if (key == 2)//右键
-					{
-						mouse_event(MOUSEEVENTF_ABSOLUTE| MOUSEEVENTF_RIGHTUP | MOUSEEVENTF_MOVE, buff[3][now]*65536/width, buff[4][now]*65536/height, 0, 0);
-					}
-					else if (key == 4)//滚轮
-					{
-						mouse_event(MOUSEEVENTF_ABSOLUTE| MOUSEEVENTF_MIDDLEUP | MOUSEEVENTF_MOVE, buff[3][now]*65536/width, buff[4][now]*65536/height, 0, 0);
-					}
+					if (timeGetTime() - stTime == 0)continue;
+					break;
 				}
-				cout << "弹起" << buff[1][now] << endl;
+				if (Pressbreak())
+				{
+					popError(9);
+				}
+			}
+			while (1)
+			{
+				if ((!Keydown(key)))
+				{
+					if (timeGetTime() - stTime == 0)continue;
+					break;
+				}
+				if (Pressbreak())
+				{
+					popError(9);
+				}
+			}
+		}
+		else if (buff[0][now] == 11)
+		{
+			int t = buff[1][now] + (((rand() << 15) + rand()) % (buff[2][now]+1));
+			waitWithTime(t);
+		}
+		else if (buff[0][now] == 12)
+		{
+			namestr = room[buff[1][now]];
+			struct stat s;
+			if (stat(namestr.c_str(), &s) != 0)
+			{
+				popError(6, buff[1][now]);
+			}
+			Mat temp;
+			temp = imread(namestr.c_str());
+			double cl = 0;
+			while (cl < PICACC)
+			{
+				waitWithTime(SCANGAP);
+				cl=screenMatch(temp,curx,cury);
+			}
+		}
+		else if (buff[0][now] == 13)
+		{
+			loopmark.push(now);
+			loopcnt.push(0);
+		}
+		else if (buff[0][now] == 14)
+		{
+			int t = loopcnt.top();
+			loopcnt.pop();
+			int lp = loopmark.top();
+			if (t + 1 < buff[1][lp])
+			{
+				now = lp;
+				loopcnt.push(t + 1);
 			}
 			else
 			{
-				if (buff[2][now] == 1)
-				{
-					keybd_event(buff[1][now], oemMark[buff[1][now]], 0, 0);
-					cout << "按下" << buff[1][now] << endl;
-				}
-				else
-				{
-					keybd_event(buff[1][now], oemBreak[buff[1][now]], KEYEVENTF_KEYUP, 0);
-					cout << "弹起" << buff[1][now] << endl;
-				}
+				loopmark.pop();
 			}
-			now++;
 		}
+		else if (buff[0][now] == 15)
+		{
+			cout << room[buff[1][now]] << endl;
+		}
+		else if (buff[0][now] == 16)
+		{
+			//do nothing
+			//因为这是注释占位
+		}
+		now++;
 	}
 	cout << "回放已结束" << endl;
 }
 
 int main(int argc,char **argv)
 {
+	bool flg = true;
+	srand(time(NULL));
 	makeKeyList();
 	makeOem();
 	memset(bk, false, sizeof(bk));
 	string name;
 	if (argc == 1)
 	{
-		cout << "请输入需要保存的脚本名称:" << endl;
-		cin >> name;
-		getchar();
-		struct stat s;
-		if (name.substr(name.size() - 3, 3) != ".sr")
+		while (flg)
 		{
-			name.append(".sr");
-		}
-		if (stat(name.c_str(), &s)==0)
-		{
-			cout << "文件已存在,是否覆盖?(Y/N)";
-			char ch = getchar();
-			if (ch != 'Y')
+			cout << "请输入需要保存的脚本名称:" << endl;
+			cin >> name;
+			getchar();
+			struct stat s;
+			if (name.substr(name.size() - 3, 3) != ".sr")
 			{
-				return 0;
+				name.append(".sr");
+			}
+			flg = false;
+			if (stat(name.c_str(), &s) == 0)
+			{
+				cout << "文件已存在,是否覆盖?(Y/N)";
+				char ch = getchar();
+				if (ch != 'Y')
+				{
+					flg = true;
+				}
+			}
+			if (flg == false)
+			{
+				makeRecord(name);
 			}
 		}
-		if (Keydown('A'))
-		{
-			cout << "mark"<<endl;
-		}
-		makeRecord(name);
 		system("pause");
 	}
 	else if(argc==2)
@@ -549,7 +1131,7 @@ int main(int argc,char **argv)
 		struct stat s;
 		if (stat(name.c_str(), &s) != 0)
 		{
-			cout << "错误:文件不存在" << endl;
+			popError(1);//文件不存在
 		}
 		else
 		{
@@ -557,7 +1139,7 @@ int main(int argc,char **argv)
 			{
 				if (name.substr(name.size() - 3, 3) != ".sr")
 				{
-					cout << "错误:文件类型不匹配" << endl;
+					popError(2);//文件类型不匹配
 				}
 				else
 				{
@@ -566,7 +1148,7 @@ int main(int argc,char **argv)
 			}
 			else
 			{
-				cout << "错误:打开的不是一个文件" << endl;
+				popError(3);
 			}
 		}
 		system("pause");
