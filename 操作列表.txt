@@ -1,0 +1,53 @@
+操作指南:
+
+.sr文件可以通过录制直接产生
+也可以通过手动编辑文本文件创建
+对于手动编辑的文件
+请确保每一行有且只有一个操作
+
+下面是各个操作的名称和使用方法
+
+press A				//单击A键
+keydown B				//按下B键							
+keyup B				//弹起B键
+
+上面三个操作对应按下键盘上的按键
+支持的按键只有
+字母键A-Z,数字键0-9
+小键盘键num1-num9
+和tab enter backspace
+					
+click mouseL 			//单击鼠标左键						
+mousedown mouseR		//按下鼠标右键					
+mouseup mouseM			//抬起鼠标中键
+mousemove x y			//移动鼠标位置	
+
+上面三个操作对应鼠标的操作
+支持三个鼠标键
+mouseL,mouseR和mouseM
+移动鼠标位置中x和y的值范围以屏幕分辨率为准
+								
+wait 1000				//暂停1000ms					
+rest					 //暂停直到按下ctrl+alt					
+waitkey A				//暂停直到按下A键					
+rwait 1000 20			//随机暂停1000-(1000+20)ms		
+waitscreenscan a.jpg		//当屏幕中出现指定图片内容后继续
+
+上面五个操作对应程序的暂停
+其中waitkey支持按键范围和按下按键的范围相同
+waitscreenscan操作的截屏间隔和灵敏度度可以通过程序开头部分的变量设置
+
+loop 10				//运行循环10次						
+endloop				//循环结束	
+
+上面两个操作组成了极其简单的循环
+loop和endloop需要成对存在且能够匹配
+					
+echo Hello world//输出指定字符串			
+note hello 2023//注释
+
+上面两个操作优化了.sr文件阅读和执行时的可读性
+note是一个不执行任何操作的操作,也需要单独放在一行
+
+祝使用愉快 :)
+	samuv1119
